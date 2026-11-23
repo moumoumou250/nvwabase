@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.0 — 2026-11-23
+
+### Added
+
+- Cross-platform graph lock: `fcntl.flock` on Unix, `msvcrt.locking` on
+  Windows, behind `locking.file_lock`. `fg.py` no longer imports `fcntl`.
+- `nvwa` is Python. The default runner (`NVWA_RUNNER=subprocess`) launches
+  the backend CLI as a child process, logs to `.fg/agents/<name>.log`, and
+  stores state in `.fg/agents/<name>.json`. Commands: `spawn`, `say`,
+  `listen`, `ps` (`list`), `logs [-f]`, `stop` (`kill`), `board`.
+- `NVWA_RUNNER=tmux` keeps pane-per-agent behavior where tmux exists.
+- `nvwa ui` serves a loopback panel (stdlib `ThreadingHTTPServer`, default
+  `127.0.0.1:8765`) with agent start/stop, SSE output, a say box, and the
+  existing fact-graph view on a 2s refresh. A per-launch token is required
+  on `/api/*`; a foreign `Origin` is rejected.
+- API: `GET /api/agents`, `GET /api/graph`, `GET /api/agents/<name>/stream`,
+  `POST /api/agents`, `POST /api/agents/<name>/say`,
+  `POST /api/agents/<name>/stop`.
+- GitHub Actions matrix: `ubuntu-latest` and `windows-latest`.
+
+### Changed
+
+- `fg-hook` reports local time from the stdlib instead of the `date` command,
+  so the hook imports on Windows.
+- `fgc init` allows an existing `.fg/agents/` directory.
+- Opening a URL uses `webbrowser`; opening a file on Windows uses
+  `os.startfile`.
+
 ## 0.3.0 — 2026-11-23
 
 General-purpose fork. The fact graph, hooks, dispatch loop, HTML view, and

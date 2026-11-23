@@ -106,6 +106,12 @@ Agent backend (claude | codex | grok), default claude:
   FG_BACKEND=grok  fgc dispatch reason     # needs the Grok CLI + XAI_API_KEY
 See README.zh-CN.md section 五 for the env vars (keys, binary path, model).
 
+nvwa is Python. Default runner is a subprocess (logs under .fg/agents/).
+  nvwa ui                     # http://127.0.0.1:8765
+  NVWA_RUNNER=tmux nvwa spawn # optional; needs tmux
+On Windows, from this checkout: py -3 nvwa   and   py -3 lib\fg.py
+install.sh itself stays a bash script (symlinks).
+
 To opt a project OUT:
   cd <project> && fgc teardown           # removes hooks + AGENTS.md (keeps .fg/)
   cd <project> && fgc teardown --purge   # also deletes the graph data

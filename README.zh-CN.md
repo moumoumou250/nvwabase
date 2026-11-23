@@ -9,7 +9,7 @@
 
 📖 **[设计原理详解（公众号长文）](https://mp.weixin.qq.com/s/nibHYWmDTf6TkNhPhtvFdw)**
 
-这个分叉是**通用**助手基座：保留共享的事实意图图、项目钩子、派发循环和 `nvwa` tmux 运行时，并可驱动 Claude Code、OpenAI Codex 或 xAI Grok CLI。领域剧本不在本仓库里。见 [相对上游移除了什么](#removed)。
+这个分叉是**通用**助手基座：保留共享的事实意图图、项目钩子、派发循环和 `nvwa` 代理运行时，并可驱动 Claude Code、OpenAI Codex 或 xAI Grok CLI。领域剧本不在本仓库里。见 [相对上游移除了什么](#removed)。
 
 ---
 
@@ -28,11 +28,11 @@
 
 | 能力 | 实现 | 文明对应物 |
 |---|---|---|
-| **造人** | 打开新的 AI 个体（如 tmux 起新会话） | 生育 |
+| **造人** | 打开新的 AI 个体（默认子进程，tmux 可选） | 生育 |
 | **语言** | AI 之间相互交流 | 交谈 |
 | **历史** | **分层事实意图图（本仓）** | 石碑 |
 
-**诚实的作用域声明**：本仓交付的是可复用内核——分层事实意图图（历史）、项目级钩子、子代理派发，以及 `nvwa` tmux 运行时（造人 / 语言）。它不绑定任何领域。把 `FG_BACKEND` 指到 `claude`、`codex` 或 `grok`，同一张图就驱动那个代理。
+**诚实的作用域声明**：本仓交付的是可复用内核——分层事实意图图（历史）、项目级钩子、子代理派发，以及 `nvwa` 运行时（造人 / 语言）。它不绑定任何领域。把 `FG_BACKEND` 指到 `claude`、`codex` 或 `grok`，同一张图就驱动那个代理。
 
 历史分三层：**标题 / 摘要 / 证据文档**——看标题知概况、按需下钻，像人查图书馆档案；知识外置后，**个体（AI 会话）死了，图还在**，继任者读图无缝接岗。感谢 [淚笑的 Cairn](https://github.com/oritera/Cairn)——需要给 AI 记录历史的时候，参考了他们的思路，很受启发。
 
@@ -50,7 +50,7 @@
 - **子代理派发**：`fgc dispatch reason|explore|verify|brainstorm|blindspot`——指挥官提议、执行者干活、验证者复核，结论全部回写图
 - **自主循环**：`fgc auto`——reason → explore → verify 循环直到目标达成或预算耗尽
 - **经验复用**：`fgc recall "<任务要点>"` 语义检索相似先例（零依赖 token 重叠打分）
-- **并发安全**：一节点一 JSON 文件，flock + 原子写，多代理并行读写不损坏；`git diff` 友好
+- **并发安全**：一节点一 JSON 文件。Unix 用 `fcntl` 锁，Windows 用 `msvcrt` 锁，写入用 `os.replace` 原子替换。多代理并行读写不损坏；`git diff` 友好
 - **可视化**：`fgc view` 生成交互式 HTML DAG（自包含单文件 / `--serve` 实时刷新）
 - **项目钩子**：`fgc setup` 按项目注入会话钩子，每轮自动携带图状态
 
@@ -75,13 +75,25 @@ nvwa spawn --name worker1 --mission "read the graph, then work on intent i001"
 # 语言：与它交流
 nvwa say worker1 "what did you find?"
 nvwa listen worker1 40
+nvwa ps
+nvwa logs worker1 -f          # Ctrl-C 结束跟随
+nvwa stop worker1
+
+# 本地面板（只绑环回地址）：代理列表、实时输出、事实图
+nvwa ui                       # http://127.0.0.1:8765
 
 # 指挥官提议 / 记事实
 nvwa dispatch reason
 nvwa fact "confirmed: X works" -t "X 成立"
 ```
 
-Claude Code 用户：钩子会在每轮注入图状态，事实与意图随对话自动累积——不换工作流，只多一块石碑。Codex 与 Grok 走同一张图：`fgc dispatch` 直接调用，`nvwa spawn` 在 `FG_BACKEND` 选中它们时打开对应的交互式 CLI。`templates/` 里的提示词是普通 Markdown，按你的领域改即可。
+默认 `nvwa spawn` 把选中的 CLI 作为子进程启动。标准输出追加到 `.fg/agents/<name>.log`，状态写在 `.fg/agents/<name>.json`，`say` 的一行写进该进程的标准输入。`NVWA_RUNNER=tmux` 仍是「一个代理一个窗格」（需要 `tmux`，原生 Windows 上不可用）。`list` 和 `kill` 分别是 `ps` 和 `stop` 的别名。
+
+`nvwa ui` 是标准库 HTTP 服务，默认 `127.0.0.1:8765`（`--host`、`--port`、`--no-open`）。同一页列出代理（状态、后端、启动/停止），用 SSE 看选中代理的输出，输入框即网页版 `say`，并嵌入现有的 `fgc view` 图且自动刷新。每次启动生成随机令牌；API 必须带 `X-Nvwa-Token`（事件流用 `?token=`）。带有其他站点 `Origin` 的请求会被拒绝。`fgc view --serve` 也默认用 8765，两者不要同时开。
+
+在 Windows 上，`lib/fg.py` 和 `nvwa` 用 `py -3` 就能跑（图锁不再在导入时依赖 `fcntl`）。`install.sh` 仍是 bash 安装器，用来做符号链接；直接在检出目录里可以 `py -3 nvwa` 和 `py -3 lib\fg.py`。必须占终端的交互式 TUI 在 Unix 上用 `NVWA_RUNNER=tmux`。子进程运行器是可移植的那条路：它记录标准输出并喂标准输入，够按行工作的代理和这块面板使用。
+
+Claude Code 用户：钩子会在每轮注入图状态，事实与意图随对话自动累积——不换工作流，只多一块石碑。Codex 与 Grok 走同一张图：`fgc dispatch` 直接调用，`nvwa spawn` 在 `FG_BACKEND` 选中它们时启动对应 CLI。`templates/` 里的提示词是普通 Markdown，按你的领域改即可。
 
 ## 五、代理后端
 
@@ -120,7 +132,7 @@ FG_BACKEND=grok nvwa spawn --name worker1 --mission "read the graph, then work"
 
 `--skip-permissions` 映射到各 CLI 的非交互审批旁路：Claude `--dangerously-skip-permissions`，Codex `--dangerously-bypass-approvals-and-sandbox`，Grok `--always-approve`。
 
-`nvwa spawn` 把 API key 放进 tmux 会话环境，不放进窗口命令。输入框检测认 Claude 的 `❯` 以及少量其他提示符；可用 `NVWA_READY_PATTERN` 覆盖。
+`nvwa spawn` 把 API key 放进子进程环境，不放进命令行。`NVWA_RUNNER=tmux` 时还会写入 tmux 会话环境。tmux 的输入框检测认 Claude 的 `❯` 以及少量其他提示符；可用 `NVWA_READY_PATTERN` 覆盖。
 
 <a id="removed"></a>
 
