@@ -10,7 +10,7 @@
 #
 # The substrate is tmux: one pane per agent, send-keys -l for reliable text
 # injection, capture-pane for reading. Any interactive CLI agent works —
-# claude, codex, gemini, or your own script.
+# claude, codex, grok, or your own script. The default follows FG_BACKEND.
 #
 # Usage:
 #   nvwa spawn --name worker1 --mission "read the graph, then explore intent i001"
@@ -21,7 +21,7 @@
 #   nvwa kill worker1
 #
 # Graph commands are identical to `fgc` (same CLI, same store):
-#   nvwa fact "confirmed observation" -k note
+#   nvwa fact "confirmed observation"
 #   nvwa intent --from f001 "next step"
 #   nvwa status
 #   nvwa dispatch reason
@@ -37,14 +37,14 @@ mkdir -p "$ROOT"
 log() { printf '[nvwa] %s\n' "$*" >&2; }
 die() { printf '[nvwa] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# ─── tmux primitives (same rules as sapper: send-keys -l only, never paste) ──
+# ─── tmux primitives (send-keys -l only, never paste) ──
 pane_text()   { tmux capture-pane -pt "$SESSION:$1" 2>/dev/null; }
 
 send_literal() {
   # send text, then Enter — then VERIFY the input box is empty again; the CLI
   # can swallow the first Enter while still rendering long pasted text, so a
   # message would sit unsubmitted forever. Bounded re-Enter until the prompt
-  # line is blank (mission-confirmation, same lesson as sapper's worker.sh).
+  # line is blank.
   local name="$1" text="$2" i pane
   tmux send-keys -t "$SESSION:$name" -l -- "$text"
   sleep 0.5
@@ -78,15 +78,58 @@ wait_input_box() {
   while (( waited < 60 )); do
     pane=$(pane_text "$name")
     accept_dialogs "$name" "$pane" && { waited=$((waited+2)); continue; }
-    printf '%s' "$pane" | grep -q '❯' && return 0
+    printf '%s' "$pane" | grep -qE "${NVWA_READY_PATTERN:-❯|›|codex>|grok>}" && return 0
     sleep 1; waited=$((waited+1))
   done
   return 1
 }
 
+# Interactive agent command. NVWA_AGENT wins; otherwise follow FG_BACKEND
+# (the same selector fgc dispatch uses) so spawn and dispatch stay aligned.
+default_agent() {
+  if [[ -n "${NVWA_AGENT:-}" ]]; then
+    printf '%s' "$NVWA_AGENT"
+    return
+  fi
+  case "$(printf '%s' "${FG_BACKEND:-${NVWA_BACKEND:-claude}}" | tr '[:upper:]' '[:lower:]')" in
+    codex|openai|openai-codex|codex-cli) printf '%s' "${FG_CODEX_BIN:-codex}" ;;
+    grok|grok-cli|xai|xai-grok)         printf '%s' "${FG_GROK_BIN:-grok}" ;;
+    *)                                  printf '%s' "${FG_CLAUDE_BIN:-claude}" ;;
+  esac
+}
+
+# Hand API keys to the tmux session environment, never on the process argv.
+# Codex CLI reads CODEX_API_KEY (not OPENAI_API_KEY). Grok CLI reads XAI_API_KEY.
+export_agent_key() {
+  local agent_base="$1"
+  case "$agent_base" in
+    codex)
+      local key=""
+      if [[ -n "${CODEX_API_KEY:-}" ]]; then
+        key="$CODEX_API_KEY"
+      elif [[ -n "${FG_CODEX_API_KEY:-}" ]]; then
+        key="$FG_CODEX_API_KEY"
+      elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        key="$OPENAI_API_KEY"
+      fi
+      if [[ -n "$key" ]]; then
+        tmux set-environment -t "$SESSION" CODEX_API_KEY "$key"
+      fi
+      ;;
+    grok)
+      if [[ -n "${XAI_API_KEY:-}" ]]; then
+        tmux set-environment -t "$SESSION" XAI_API_KEY "$XAI_API_KEY"
+      elif [[ -n "${FG_GROK_API_KEY:-}" ]]; then
+        tmux set-environment -t "$SESSION" XAI_API_KEY "$FG_GROK_API_KEY"
+      fi
+      ;;
+  esac
+}
+
 # ─── Create: spawn a new AI agent ────────────────────────────────────────────
 cmd_spawn() {
-  local name="" agent="${NVWA_AGENT:-claude}" mission="" minutes="" a
+  local name="" agent="" mission="" minutes="" a
+  agent="$(default_agent)"
   while (( $# )); do
     a=$1; shift
     case "$a" in
@@ -109,7 +152,8 @@ cmd_spawn() {
   # kill stale window if re-spawning same name
   tmux kill-window -t "$SESSION:$name" 2>/dev/null
 
-  # launch the agent
+  # launch the agent. Keys are session environment, not part of this command.
+  export_agent_key "$(basename "$agent")"
   tmux new-window -d -t "$SESSION" -n "$name" \
     "$agent 2>&1; echo NVWA_PANE_EXITED; exec sleep infinity"
   log "$name: spawned ($agent)"
@@ -185,7 +229,9 @@ nvwa — the Nüwa Foundation CLI (Create + Language + History)
 
 Create:
   spawn [--name NAME] [--agent CMD] [--mission "..."]    start a new AI agent
-                                                          --agent: any interactive CLI (default: claude)
+                                                          --agent: any interactive CLI
+                                                          default follows FG_BACKEND
+                                                          (claude | codex | grok)
   kill <name>                                             stop an agent
 
 Language:
@@ -201,8 +247,19 @@ History (same as fgc — shared fact-intent graph):
   All fgc commands pass through transparently.
 
 Environment:
-  NVWA_SESSION   tmux session name (default: nvwa)
-  NVWA_AGENT     default agent command for spawn (default: claude)
+  NVWA_SESSION      tmux session name (default: nvwa)
+  NVWA_AGENT        interactive command for spawn (overrides FG_BACKEND)
+  FG_BACKEND        claude | codex | grok (also selects fgc dispatch)
+  NVWA_BACKEND      used when FG_BACKEND is unset
+  FG_CLAUDE_BIN     claude binary (default: claude)
+  FG_CODEX_BIN      codex binary (default: codex)
+  FG_GROK_BIN       grok binary (default: grok)
+  CODEX_API_KEY     Codex API key (preferred)
+  OPENAI_API_KEY    copied to CODEX_API_KEY for spawn when CODEX_API_KEY is unset
+  FG_CODEX_API_KEY  same, and wins over OPENAI_API_KEY
+  XAI_API_KEY       Grok API key (preferred)
+  FG_GROK_API_KEY   copied to XAI_API_KEY for spawn when XAI_API_KEY is unset
+  NVWA_READY_PATTERN  egrep pattern that means the agent's input box is ready
   NVWA_MAX_WORKERS  max concurrent agents (default: 8)
 USAGE
     ;;

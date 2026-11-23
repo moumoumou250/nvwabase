@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 — 2026-11-23
+
+General-purpose fork. The fact graph, hooks, dispatch loop, HTML view, and
+`nvwa` tmux runtime stay. Domain-specific framing does not.
+
+### Removed
+
+- Docs and roadmap items that described a penetration-testing legion,
+  attack-defense scoring, and an offensive-tool marking scheme.
+- Docs for an unimplemented pentest fact schema (`host` / `service` / `cred`
+  / `vuln` / `loot` / `flag`, `-k` / `-d`). Facts remain untyped observations.
+- The example that asked the commander to classify work as attack surface,
+  payload, or exploit evidence.
+
+### Added
+
+- Selectable dispatch backends: `claude` (default), `codex` (OpenAI Codex CLI
+  `codex exec --json`), and `grok` (xAI Grok CLI `grok --output-format json
+  --prompt-file`). Choose with `--backend`, `FG_BACKEND`, or `NVWA_BACKEND`.
+- `fgc backend` prints the resolved backend, model, binary, and whether an
+  API key is configured. It does not print the key.
+- Codex auth: `CODEX_API_KEY`, or `FG_CODEX_API_KEY` / `OPENAI_API_KEY` copied
+  into the child environment as `CODEX_API_KEY`. Binary `FG_CODEX_BIN`, model
+  `FG_CODEX_MODEL`.
+- Grok auth: `XAI_API_KEY`, or `FG_GROK_API_KEY` copied to `XAI_API_KEY` when
+  unset. Binary `FG_GROK_BIN`, model `FG_GROK_MODEL`.
+- `nvwa spawn` follows the same backend when `NVWA_AGENT` is unset, and puts
+  the API key in the tmux session environment rather than on the command line.
+
 ## 0.2.0 — 2026-09-24
 
 This release hardens the graph at the boundaries where a local JSON file, an

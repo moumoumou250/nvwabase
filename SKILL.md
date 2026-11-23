@@ -1,6 +1,6 @@
 ---
 name: fact-graph
-description: A fact-graph working memory for AI agent work — replaces heavy agent front/backends with JSON files + shell. Maintains a DAG of facts (confirmed observations) and intents (units of work), queryable and writable via the `fgc` CLI, with dispatch for Sonnet executor steps, project hooks that inject graph state and current date output, and optional user-authorized tmux peer messaging via fgc peers/send/capture. Use when the user wants to track multi-step agent work as a shared, observable graph — debugging campaigns, research reproduction, security audits, multi-agent tmux ops — without a database or web UI.
+description: A fact-graph working memory for AI agent work — replaces heavy agent front/backends with JSON files + shell. Maintains a DAG of facts (confirmed observations) and intents (units of work), queryable and writable via the `fgc` CLI, with dispatch through a selectable CLI backend (Claude Code, OpenAI Codex, or xAI Grok), project hooks that inject graph state and current date output, and optional user-authorized tmux peer messaging via fgc peers/send/capture. Use when the user wants to track multi-step agent work as a shared, observable graph — debugging, research reproduction, multi-agent tmux ops — without a database or web UI.
 license: MIT
 ---
 
@@ -177,27 +177,37 @@ The static snapshot inlines the JSON so it opens from `file://` with no server;
 `--serve` starts a stdlib HTTP server that polls `/__fg_graph__.json` and
 redraws on change — keep it open in a window while you work.
 
-### dispatch — spawn a Sonnet agent step
+### dispatch — spawn an agent step
 
 ```bash
+fgc backend                                  # which CLI will run (claude | codex | grok)
 fgc dispatch reason                          # commander: read graph, propose next intents
 fgc dispatch i003 --skip-permissions         # executor: work intent i003
 fgc dispatch verify --intent i003            # verify i003's claimed result
 
 fgc dispatch reason --dry-run                # just print the rendered prompt
-fgc dispatch i003 --model sonnet --timeout 900
+fgc dispatch i003 --backend codex --model gpt-6.1-sol --timeout 900
 ```
 
-`dispatch reason` renders `templates/reason.md` against the graph, calls
-`claude -p --output-format json`, extracts the JSON the model returns, and
-**writes the new intents straight back into the graph**. `dispatch <intent>`
-does the same for a single intent with `explore.md`, then records the produced
-fact and links the intent. `dispatch verify` checks a concluded intent's fact.
+`dispatch reason` renders `templates/reason.md` against the graph, calls the
+selected CLI, extracts the JSON the model returns, and **writes the new
+intents straight back into the graph**. `dispatch <intent>` does the same for
+a single intent with `explore.md`, then records the produced fact and links
+the intent. `dispatch verify` checks a concluded intent's fact.
 
-Defaults: `--model sonnet`, `--timeout 600`. Override with `FG_MODEL` /
-`FG_TIMEOUT` env vars. The executor runs in the **current working directory**
-with the graph's `.fg/` on disk, so the spawned agent reads/writes the same
-memory you do.
+Backend selection: `--backend`, else `FG_BACKEND`, else `NVWA_BACKEND`, else
+`claude`. Claude runs `claude -p --output-format json`. Codex runs
+`codex exec --json` with the prompt on stdin and reads `CODEX_API_KEY`
+(`OPENAI_API_KEY` / `FG_CODEX_API_KEY` are copied into that variable for the
+child). Grok runs `grok --output-format json --prompt-file` and reads
+`XAI_API_KEY` (`FG_GROK_API_KEY` is copied when `XAI_API_KEY` is unset).
+See the README for the full env list (`FG_CODEX_BIN`, `FG_GROK_MODEL`, …).
+
+Model selection: `--model`, else `FG_<BACKEND>_MODEL`, else `FG_MODEL`, else
+`sonnet` for Claude. Codex and Grok omit `--model` when nothing is set, so
+the CLI's own default is used. Timeout default is 600s (`FG_TIMEOUT`). The
+executor runs in the **current working directory** with the graph's `.fg/`
+on disk, so the spawned agent reads/writes the same memory you do.
 
 ### auto — drive the whole graph to completion
 
@@ -218,7 +228,7 @@ so you can preview a plan without spending executor tokens.
 
 ```
 1. fgc dispatch reason              → proposes i007, i008 into the graph
-2. fgc dispatch i007 --skip-permissions   → sonnet does the work, writes f009, links i007→f009
+2. fgc dispatch i007 --skip-permissions   → the selected backend does the work, writes f009, links i007→f009
 3. fgc dispatch verify --intent i007      → confirm f009 is real
 4. (repeat 1-3 until) fgc dispatch reason → returns {"complete": ...} → project done
 ```
@@ -228,7 +238,7 @@ resume** — `fgc status` tells you exactly where things stand.
 
 ## Autonomy guardrail
 
-`fgc dispatch` spawns real `claude` subprocesses that can run shell commands and
+`fgc dispatch` spawns a real agent CLI (Claude, Codex, or Grok) that can run shell commands and
 edit files. The executor prompt instructs the agent to stay scoped to its
 intent and record only confirmed observations — but like any autonomous agent
 step, **review what it did before trusting the facts it wrote**. Use
@@ -249,8 +259,8 @@ close the channel.
 
 Be careful when **all three** are true at once: (1) the graph was seeded from or
 fed by untrusted content (a hostile `.fg/*.json` someone dropped in the repo, or
-a fact the agent transcribed from attacker-controlled code/output while
-debugging a vuln), (2) you pass `--skip-permissions`, and (3) the executor has
+a fact the agent transcribed from untrusted program output), (2) you pass
+`--skip-permissions`, and (3) the executor has
 real shell/file access. In that combination a graph field can attempt to drive
 the agent. Concretely: **do not run `fgc auto --skip-permissions` (or
 `dispatch <intent> --skip-permissions`) on a repo whose `.fg/` came from an
@@ -262,7 +272,7 @@ as opt-in per run, never as the default.
 
 The templates are plain markdown with `{placeholder}` substitution. Edit
 `templates/*.md` to tune the commander/executor behavior (e.g. constrain facts
-to a security-finding schema, like StarVoya's `appsec` profile). Available
+to the schema of the domain you are working in). Available
 placeholders: `{origin}`, `{goal}`, `{graph_yaml}`, `{fact_ids}`,
 `{open_intents}`, `{hints}`, `{max_intents}` (reason); `{graph_yaml}`,
 `{intent_id}`, `{intent_description}` (explore); `{intent_description}`,
@@ -273,7 +283,7 @@ placeholders: `{origin}`, `{goal}`, `{graph_yaml}`, `{fact_ids}`,
 - Storage + locking: `lib/fg.py` → `Store`, `atomic_write_json`, `Store.locked`
 - Graph queries: `build_graph_view`, `frontier`, `is_ready`
 - Renderers: `render_status`, `render_graph_text`, `render_prompt`
-- Dispatch: `cmd_dispatch`, `run_claude`, `_apply_reason`, `_parse_explore_payload`
+- Dispatch: `cmd_dispatch`, `run_claude`, `lib/backends.py`, `_apply_reason`, `_parse_explore_payload`
 - Auto-loop driver: `cmd_auto`, `_run_reason_raw`, `_run_explore_raw`, `_run_verify_raw`
 - LLM-output parsing (tolerant of surrounding prose): `extract_json_object`
 - Project hooks: `lib/fg-hook.py` (SessionStart / UserPromptSubmit),

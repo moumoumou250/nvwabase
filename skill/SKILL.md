@@ -75,6 +75,7 @@ authorized in this project's `.fg/ai-peers.json`.
   `fgc dispatch <intent-id> --skip-permissions` (executor does the work),
   `fgc dispatch verify --intent <id>` (verify a result), or
   `fgc auto --skip-permissions` (full loop to completion).
+  `fgc backend` shows whether that loop will call Claude, Codex, or Grok.
 - See state anytime: `fgc status`, `fgc graph`; run the read-only `fgc validate`
   audit before autonomous dispatch or committing `.fg/`.
 
