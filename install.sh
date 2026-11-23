@@ -100,6 +100,12 @@ Or just invoke the skill from inside Claude Code:
 After that, every turn in that project auto-injects the current graph state,
 and you can drive it with `fgc dispatch reason` / `fgc auto`.
 
+Agent backend (claude | codex | grok), default claude:
+  fgc backend
+  FG_BACKEND=codex fgc dispatch reason     # needs the Codex CLI + API key
+  FG_BACKEND=grok  fgc dispatch reason     # needs the Grok CLI + XAI_API_KEY
+See README.zh-CN.md section 五 for the env vars (keys, binary path, model).
+
 To opt a project OUT:
   cd <project> && fgc teardown           # removes hooks + AGENTS.md (keeps .fg/)
   cd <project> && fgc teardown --purge   # also deletes the graph data

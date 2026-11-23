@@ -11,7 +11,8 @@ State is encoded in graph structure, not in a state machine. Storage is one
 JSON file per node (git-diffable) under a project-local `.fg/` directory,
 guarded by fcntl.flock so multiple agents can touch it concurrently.
 
-Pure stdlib. See `fgc --help` and SKILL.md.
+Pure stdlib. Dispatch talks to a selectable CLI backend (Claude Code,
+OpenAI Codex, or xAI Grok). See `fgc --help` and SKILL.md.
 """
 from __future__ import annotations
 
@@ -29,7 +30,16 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-__version__ = "0.2.0"
+# The installed `fgc` command is a symlink. Python puts the symlink's
+# directory on sys.path, not this file's directory, so the sibling module
+# would otherwise be invisible.
+_LIB_DIR = Path(__file__).resolve().parent
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
+import backends  # noqa: E402
+
+__version__ = "0.3.0"
 
 GOAL_ID = "goal"
 DEFAULT_STORE = ".fg"
@@ -1245,15 +1255,18 @@ def run_claude(
         raise FGError("claude timeout must be at least 1 second")
     if not isinstance(model, str) or not model.strip():
         raise FGError("claude model cannot be empty")
-    argv = [
-        "claude", "-p",
-        "--output-format", "json",
-        "--model", model,
-    ]
-    if skip_permissions:
-        argv.append("--dangerously-skip-permissions")
-    if append_system:
-        argv += ["--append-system-prompt", append_system]
+    try:
+        binary = backends.resolve_binary("claude")
+        argv = backends.build_argv(
+            "claude",
+            binary=binary,
+            model=model,
+            skip_permissions=skip_permissions,
+            append_system=append_system,
+            cwd=cwd,
+        )
+    except backends.BackendError as exc:
+        raise FGError(str(exc)) from exc
     try:
         proc = subprocess.run(
             argv,
@@ -1264,7 +1277,10 @@ def run_claude(
             cwd=str(cwd),
         )
     except FileNotFoundError:
-        raise FGError("`claude` CLI not found on PATH; install Claude Code to dispatch.")
+        raise FGError(
+            f"`{binary}` CLI not found on PATH; install Claude Code "
+            f"or set FG_CLAUDE_BIN."
+        )
     except subprocess.TimeoutExpired:
         raise FGError(f"claude dispatch timed out after {timeout}s")
     if proc.returncode != 0:
@@ -1285,6 +1301,55 @@ def run_claude(
     if not isinstance(envelope.get("result", ""), str):
         raise FGError("claude response envelope has a non-string result")
     return envelope
+
+
+def _prepare_llm(args) -> tuple[str, str]:
+    """Resolve backend + model from CLI flags and FG_* environment variables."""
+    try:
+        backend = backends.resolve_backend(getattr(args, "backend", None))
+        model = backends.resolve_model(backend, getattr(args, "model", None))
+    except backends.BackendError as exc:
+        raise FGError(str(exc)) from exc
+    timeout = getattr(args, "timeout", 600)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
+        raise FGError("--timeout must be at least 1 second")
+    if backend == "claude" and not model.strip():
+        raise FGError("--model cannot be empty")
+    return backend, model
+
+
+def _call_backend(
+    prompt: str,
+    *,
+    backend: str,
+    model: str,
+    timeout: int,
+    skip: bool,
+    append_system: str | None,
+    cwd: Path,
+) -> dict:
+    """Run the selected CLI agent. Claude stays on ``run_claude``."""
+    if backend == "claude":
+        return run_claude(
+            prompt,
+            model=model,
+            timeout=timeout,
+            skip_permissions=skip,
+            append_system=append_system,
+            cwd=cwd,
+        )
+    try:
+        return backends.run_agent(
+            prompt,
+            backend=backend,
+            model=model,
+            timeout=timeout,
+            skip_permissions=skip,
+            append_system=append_system,
+            cwd=cwd,
+        )
+    except backends.BackendError as exc:
+        raise FGError(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -1625,30 +1690,34 @@ def cmd_confirm(args) -> int:
 def cmd_dispatch(args) -> int:
     store = Store(Path(args.store))
     store.require()
-    model = args.model
+    backend, model = _prepare_llm(args)
     timeout = args.timeout
-    if not isinstance(model, str) or not model.strip():
-        raise FGError("--model cannot be empty")
-    if timeout < 1:
-        raise FGError("--timeout must be at least 1 second")
     skip = args.skip_permissions
     templates_dir = Path(args.templates)
 
     cwd = Path.cwd()
 
     if args.target == "reason":
-        return _dispatch_reason(store, templates_dir, model, timeout, skip, cwd, args)
+        return _dispatch_reason(
+            store, templates_dir, model, timeout, skip, cwd, args, backend
+        )
     elif args.target == "verify":
-        return _dispatch_verify(store, templates_dir, model, timeout, skip, cwd, args)
+        return _dispatch_verify(
+            store, templates_dir, model, timeout, skip, cwd, args, backend
+        )
     elif args.target == "blindspot":
-        return _dispatch_blindspot(store, templates_dir, model, timeout, skip, cwd, args)
+        return _dispatch_blindspot(
+            store, templates_dir, model, timeout, skip, cwd, args, backend
+        )
     elif args.target == "brainstorm":
-        return _dispatch_brainstorm(store, templates_dir, model, timeout, skip, cwd, args)
+        return _dispatch_brainstorm(
+            store, templates_dir, model, timeout, skip, cwd, args, backend
+        )
     else:
         # treat as intent id -> explore
         intent = store.get_intent(args.target)
         return _dispatch_explore(
-            store, templates_dir, intent, model, timeout, skip, cwd, args
+            store, templates_dir, intent, model, timeout, skip, cwd, args, backend
         )
 
 
@@ -1677,15 +1746,15 @@ def _agents_system_prompt(store: Store) -> str:
     )
 
 
-def _dispatch_reason(store, templates_dir, model, timeout, skip, cwd, args) -> int:
+def _dispatch_reason(store, templates_dir, model, timeout, skip, cwd, args, backend: str = "claude") -> int:
     tpl = _load_template(templates_dir, "reason.md")
     prompt = render_prompt(store, tpl)
     if args.dry_run:
         print(prompt)
         return 0
-    envelope = run_claude(
+    envelope = _call_backend(
         prompt,
-        model=model, timeout=timeout, skip_permissions=skip,
+        backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=None, cwd=cwd,
     )
     text = envelope.get("result", "")
@@ -1702,7 +1771,7 @@ def _worker_id(model: str) -> str:
     return f"{model}-{os.getpid()}"
 
 
-def _dispatch_explore(store, templates_dir, intent, model, timeout, skip, cwd, args) -> int:
+def _dispatch_explore(store, templates_dir, intent, model, timeout, skip, cwd, args, backend: str = "claude") -> int:
     # idempotency: if the intent is already concluded, a prior dispatch already
     # ran an executor for it. Re-dispatching would waste a model call AND fail
     # to write back. Report the existing result instead.
@@ -1715,14 +1784,20 @@ def _dispatch_explore(store, templates_dir, intent, model, timeout, skip, cwd, a
             f"intent {intent['id']} requires confirmation; run `fgc confirm {intent['id']}` first"
         )
     if not skip:
-        # explore needs to actually do work (shell, edits); without skip-permissions
-        # it will prompt the user for each tool use, which is usually not what
-        # an autonomous dispatch wants. Warn but proceed.
-        sys.stderr.write(
-            "[warn] explore without --skip-permissions will prompt for every "
-            "tool use; pass --skip-permissions for autonomous runs.\n"
-        )
-    worker = _worker_id(model)
+        # Explore needs to actually do work (shell, edits). Claude prompts for
+        # each tool use; Codex and Grok stay on their default approval mode,
+        # which will not click through prompts in a headless dispatch.
+        if backend == "claude":
+            sys.stderr.write(
+                "[warn] explore without --skip-permissions will prompt for every "
+                "tool use; pass --skip-permissions for autonomous runs.\n"
+            )
+        else:
+            sys.stderr.write(
+                "[warn] explore without --skip-permissions uses the CLI's default "
+                "approval mode; pass --skip-permissions for unattended runs.\n"
+            )
+    worker = _worker_id(model or backend)
     tpl = _load_template(templates_dir, "explore.md")
     prompt = render_intent_prompt(store, tpl, intent)
     if args.dry_run:
@@ -1730,9 +1805,9 @@ def _dispatch_explore(store, templates_dir, intent, model, timeout, skip, cwd, a
         return 0
     if args.claim:
         store.claim_intent(intent["id"], worker)
-    envelope = run_claude(
+    envelope = _call_backend(
         prompt,
-        model=model, timeout=timeout, skip_permissions=skip,
+        backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=_agents_system_prompt(store), cwd=cwd,
     )
     text = envelope.get("result", "")
@@ -1747,7 +1822,7 @@ def _dispatch_explore(store, templates_dir, intent, model, timeout, skip, cwd, a
     return 0
 
 
-def _dispatch_verify(store, templates_dir, model, timeout, skip, cwd, args) -> int:
+def _dispatch_verify(store, templates_dir, model, timeout, skip, cwd, args, backend: str = "claude") -> int:
     if not args.intent:
         raise FGError("verify requires --intent <id>")
     intent = store.get_intent(args.intent)
@@ -1762,8 +1837,8 @@ def _dispatch_verify(store, templates_dir, model, timeout, skip, cwd, args) -> i
     if args.dry_run:
         print(prompt)
         return 0
-    envelope = run_claude(
-        prompt, model=model, timeout=timeout, skip_permissions=skip,
+    envelope = _call_backend(
+        prompt, backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=None, cwd=cwd,
     )
     text = envelope.get("result", "")
@@ -1776,15 +1851,15 @@ def _dispatch_verify(store, templates_dir, model, timeout, skip, cwd, args) -> i
     return 0 if verified else 1
 
 
-def _dispatch_blindspot(store, templates_dir, model, timeout, skip, cwd, args) -> int:
+def _dispatch_blindspot(store, templates_dir, model, timeout, skip, cwd, args, backend: str = "claude") -> int:
     tpl = _load_template(templates_dir, "blindspot.md")
     prompt = render_prompt(store, tpl)
     if args.dry_run:
         print(prompt)
         return 0
-    envelope = run_claude(
+    envelope = _call_backend(
         prompt,
-        model=model, timeout=timeout, skip_permissions=skip,
+        backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=None, cwd=cwd,
     )
     text = envelope.get("result", "")
@@ -1828,7 +1903,7 @@ def _apply_blindspot(store: Store, payload: dict) -> str:
     return f"identified {len(recorded)} blindspot(s): {', '.join(recorded)}"
 
 
-def _dispatch_brainstorm(store, templates_dir, model, timeout, skip, cwd, args) -> int:
+def _dispatch_brainstorm(store, templates_dir, model, timeout, skip, cwd, args, backend: str = "claude") -> int:
     if args.max_options < 1 or args.max_options > 20:
         raise FGError("--max-options must be between 1 and 20")
     tpl = _load_template(templates_dir, "brainstorm.md")
@@ -1841,9 +1916,9 @@ def _dispatch_brainstorm(store, templates_dir, model, timeout, skip, cwd, args) 
     if args.dry_run:
         print(prompt)
         return 0
-    envelope = run_claude(
+    envelope = _call_backend(
         prompt,
-        model=model, timeout=timeout, skip_permissions=skip,
+        backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=None, cwd=cwd,
     )
     text = envelope.get("result", "")
@@ -2437,22 +2512,24 @@ def cmd_auto(args) -> int:
     store = Store(Path(args.store))
     store.require()
     templates_dir = Path(args.templates)
-    model = args.model
+    backend, model = _prepare_llm(args)
     timeout = args.timeout
     skip = args.skip_permissions
     cwd = Path.cwd()
     max_steps = args.max_steps
     max_explore = args.max_explore
-    if timeout < 1:
-        raise FGError("--timeout must be at least 1 second")
     if max_steps < 1:
         raise FGError("--max-steps must be at least 1")
     if max_explore < 1:
         raise FGError("--max-explore must be at least 1")
     verify = args.verify
     dry = args.dry_run
+    shown_model = model or "(cli default)"
 
-    print(f"[auto] start  model={model} max_steps={max_steps} verify={verify}")
+    print(
+        f"[auto] start  backend={backend} model={shown_model} "
+        f"max_steps={max_steps} verify={verify}"
+    )
     noop_streak = 0
     explore_count = 0
     for step in range(1, max_steps + 1):
@@ -2467,11 +2544,13 @@ def cmd_auto(args) -> int:
         if dry:
             # dry-run prints the rendered prompt; it never mutates the graph,
             # so one pass is enough (review L5: don't repeat max_steps times).
-            _dispatch_reason(store, templates_dir, model, timeout, skip, cwd, args)
+            _dispatch_reason(
+                store, templates_dir, model, timeout, skip, cwd, args, backend
+            )
             break
         try:
             kind, summary = _run_reason_raw(
-                store, templates_dir, model, timeout, skip, cwd
+                store, templates_dir, model, timeout, skip, cwd, backend
             )
         except FGError as exc:
             print(f"[auto] step {step}: reason failed: {exc}")
@@ -2491,7 +2570,7 @@ def cmd_auto(args) -> int:
         noop_streak = 0
 
         # 2) explore each ready intent, up to the per-step cap
-        auto_worker = _worker_id(model)
+        auto_worker = _worker_id(model or backend)
         ready = [
             i for i in frontier(store)
             if not i.get("worker") or i.get("worker") == auto_worker
@@ -2513,7 +2592,7 @@ def cmd_auto(args) -> int:
             try:
                 _run_explore_raw(
                     store, templates_dir, intent, model, timeout, skip, cwd,
-                    claim=True,
+                    backend, claim=True,
                 )
             except FGError as exc:
                 print(f"[auto] explore {intent['id']} failed: {exc}")
@@ -2527,7 +2606,8 @@ def cmd_auto(args) -> int:
                     print(f"[auto] step {step}.3 verify {iid}")
                     try:
                         verified, issues = _run_verify_raw(
-                            store, templates_dir, refreshed, model, timeout, skip, cwd
+                            store, templates_dir, refreshed, model, timeout, skip, cwd,
+                            backend,
                         )
                         tag = "VERIFIED" if verified else "FAILED"
                         print(f"[auto]        verify {iid} -> {tag}" + (f": {issues}" if issues else ""))
@@ -2555,12 +2635,12 @@ def cmd_auto(args) -> int:
     return 0
 
 
-def _run_reason_raw(store, templates_dir, model, timeout, skip, cwd) -> tuple[str, str]:
+def _run_reason_raw(store, templates_dir, model, timeout, skip, cwd, backend: str = "claude") -> tuple[str, str]:
     """Like _dispatch_reason but returns (kind, summary) instead of printing."""
     tpl = _load_template(templates_dir, "reason.md")
     prompt = render_prompt(store, tpl)
-    envelope = run_claude(
-        prompt, model=model, timeout=timeout, skip_permissions=skip,
+    envelope = _call_backend(
+        prompt, backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=None, cwd=cwd,
     )
     payload = extract_json_object(envelope.get("result", ""))
@@ -2569,20 +2649,23 @@ def _run_reason_raw(store, templates_dir, model, timeout, skip, cwd) -> tuple[st
     return kind, summary
 
 
-def _run_explore_raw(store, templates_dir, intent, model, timeout, skip, cwd, claim=False) -> dict:
+def _run_explore_raw(
+    store, templates_dir, intent, model, timeout, skip, cwd,
+    backend: str = "claude", claim=False,
+) -> dict:
     if intent["to"] is not None:
         return store.get_fact(intent["to"])
     if intent.get("requires_confirmation") and not intent.get("confirmed_at"):
         raise FGError(
             f"intent {intent['id']} requires confirmation; run `fgc confirm {intent['id']}` first"
         )
-    worker = _worker_id(model)
+    worker = _worker_id(model or backend)
     tpl = _load_template(templates_dir, "explore.md")
     prompt = render_intent_prompt(store, tpl, intent)
     if claim:
         store.claim_intent(intent["id"], worker)
-    envelope = run_claude(
-        prompt, model=model, timeout=timeout, skip_permissions=skip,
+    envelope = _call_backend(
+        prompt, backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=_agents_system_prompt(store), cwd=cwd,
     )
     payload = extract_json_object(envelope.get("result", ""))
@@ -2592,15 +2675,15 @@ def _run_explore_raw(store, templates_dir, intent, model, timeout, skip, cwd, cl
     return fact
 
 
-def _run_verify_raw(store, templates_dir, intent, model, timeout, skip, cwd) -> tuple[bool, str]:
+def _run_verify_raw(store, templates_dir, intent, model, timeout, skip, cwd, backend: str = "claude") -> tuple[bool, str]:
     fact = store.get_fact(intent["to"])
     tpl = _load_template(templates_dir, "verify.md")
     prompt = _replace_placeholders(tpl, {
         "intent_description": _scrub_inline(intent["description"]),
         "result_description": _scrub_inline(fact["description"]),
     })
-    envelope = run_claude(
-        prompt, model=model, timeout=timeout, skip_permissions=skip,
+    envelope = _call_backend(
+        prompt, backend=backend, model=model, timeout=timeout, skip=skip,
         append_system=None, cwd=cwd,
     )
     payload = extract_json_object(envelope.get("result", ""))
@@ -2952,6 +3035,31 @@ fgc capture <peer>             # read recent output from an authorized peer pane
 """
 
 
+def cmd_backend(args) -> int:
+    """Print the resolved agent backend. Never prints secret values."""
+    try:
+        backend = backends.resolve_backend(getattr(args, "backend", None))
+        model = backends.resolve_model(backend, getattr(args, "model", None))
+        binary = backends.resolve_binary(backend)
+        key = backends.api_key_status(backend)
+    except backends.BackendError as exc:
+        raise FGError(str(exc)) from exc
+    shown = model if model else "(cli default)"
+    if args.json:
+        print(json.dumps({
+            "backend": backend,
+            "model": model,
+            "binary": binary,
+            "api_key": key,
+        }, ensure_ascii=False))
+    else:
+        print(f"backend: {backend}")
+        print(f"model: {shown}")
+        print(f"binary: {binary}")
+        print(f"api_key: {key}")
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # argparse
 # --------------------------------------------------------------------------- #
@@ -3155,13 +3263,35 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id")
     sp.set_defaults(func=cmd_confirm)
 
-    sp = sub.add_parser("dispatch", help="run a commander/executor step via the claude CLI")
-    sp.add_argument("target", help="'reason' | 'verify' | <intent-id>")
-    sp.add_argument("--model", default=os.environ.get("FG_MODEL", "sonnet"))
+    sp = sub.add_parser(
+        "backend",
+        help="show the selected agent backend (claude, codex, or grok)",
+        description=(
+            "Resolve the dispatch backend from --backend / FG_BACKEND / "
+            "NVWA_BACKEND and print the model, binary, and whether an API "
+            "key is configured. The key value is never printed."
+        ),
+    )
+    sp.add_argument("--backend", default=None,
+                    help="claude | codex | grok (default: $FG_BACKEND or claude)")
+    sp.add_argument("--model", default=None,
+                    help="model id (default: FG_<BACKEND>_MODEL, else FG_MODEL)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_backend)
+
+    sp = sub.add_parser("dispatch", help="run a commander/executor step via the selected agent CLI")
+    sp.add_argument("target", help="'reason' | 'verify' | 'blindspot' | 'brainstorm' | <intent-id>")
+    sp.add_argument("--backend", default=None,
+                    help="claude | codex | grok (default: $FG_BACKEND or $NVWA_BACKEND or claude)")
+    sp.add_argument("--model", default=None,
+                    help="model id (default: FG_<BACKEND>_MODEL, else FG_MODEL, else the CLI default)")
     sp.add_argument("--timeout", type=int, default=int(os.environ.get("FG_TIMEOUT", "600")))
     sp.add_argument("--templates", default=None, help="templates dir (default: <store>/../templates or SKILL dir)")
     sp.add_argument("--skip-permissions", action="store_true",
-                    help="pass --dangerously-skip-permissions to the executor")
+                    help=("skip interactive permission prompts "
+                          "(claude: --dangerously-skip-permissions; "
+                          "codex: --dangerously-bypass-approvals-and-sandbox; "
+                          "grok: --always-approve)"))
     sp.add_argument("--dry-run", action="store_true", help="print the rendered prompt and exit")
     sp.add_argument("--claim", action="store_true", help="(explore) claim the intent first")
     sp.add_argument("--intent", default=None, help="(verify) intent id to verify")
@@ -3225,7 +3355,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "auto", help="drive the whole graph forward: reason -> explore -> verify -> repeat"
     )
-    sp.add_argument("--model", default=os.environ.get("FG_MODEL", "sonnet"))
+    sp.add_argument("--backend", default=None,
+                    help="claude | codex | grok (default: $FG_BACKEND or $NVWA_BACKEND or claude)")
+    sp.add_argument("--model", default=None,
+                    help="model id (default: FG_<BACKEND>_MODEL, else FG_MODEL, else the CLI default)")
     sp.add_argument("--timeout", type=int, default=int(os.environ.get("FG_TIMEOUT", "600")))
     sp.add_argument("--templates", default=None)
     sp.add_argument("--skip-permissions", action="store_true")

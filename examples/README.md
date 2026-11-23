@@ -22,7 +22,7 @@ fgc graph                    # full graph as text
 # 3. commander proposes the first intents (DRY RUN first to see the prompt)
 fgc dispatch reason --dry-run
 
-# 4. for real — sonnet reads the graph and writes intents into .fg/
+# 4. for real — the selected backend reads the graph and writes intents into .fg/
 fgc dispatch reason
 
 # 5. work the first proposed intent (autonomous executor; prompts each tool use
@@ -52,13 +52,13 @@ fgc status      # picks up exactly where you left off
 fgc graph       # full history of facts + intents
 ```
 
-## custom schema (e.g. a security profile)
+## custom schema (any domain)
 
-Edit `templates/reason.md` to constrain the commander, e.g.:
+Edit `templates/reason.md` to constrain the commander, for example a research
+notebook:
 
-> Each intent must target exactly one of: attack-surface, trust-boundary,
-> payload, repro-evidence, verdict, false-positive-reason. State which.
+> Each intent must target exactly one of: question, method, evidence,
+> conclusion. State which.
 
-Now the graph naturally accumulates a structured security finding instead of
-free-form facts — same idea as StarVoya's `dispatch_appsec.yaml` profile, but
-with no YAML, no dispatcher, and no worker pool.
+The graph then accumulates a structured record instead of free-form facts —
+same idea as a domain profile, with no extra service and no worker pool.
