@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 — 2026-11-23
+
+- The Grok prompt-file test accepts Windows `st_mode` `0o666`. `os.chmod(0o600)`
+  does not show up in `stat` there; the file is still deleted after the CLI returns.
+
 ## 0.4.0 — 2026-11-23
 
 ### Added
