@@ -9,7 +9,8 @@ marks the whole project complete.
 
 State is encoded in graph structure, not in a state machine. Storage is one
 JSON file per node (git-diffable) under a project-local `.fg/` directory,
-guarded by fcntl.flock so multiple agents can touch it concurrently.
+guarded by a cross-platform file lock (fcntl on Unix, msvcrt on Windows)
+so multiple agents can touch it concurrently.
 
 Pure stdlib. Dispatch talks to a selectable CLI backend (Claude Code,
 OpenAI Codex, or xAI Grok). See `fgc --help` and SKILL.md.
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import fcntl
 import json
 import os
 import re
@@ -38,8 +38,9 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 import backends  # noqa: E402
+import locking  # noqa: E402
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 GOAL_ID = "goal"
 DEFAULT_STORE = ".fg"
@@ -67,7 +68,7 @@ class FGError(Exception):
 # store
 # --------------------------------------------------------------------------- #
 class Store:
-    """Filesystem-backed fact graph. One file per node, fcntl-locked."""
+    """Filesystem-backed fact graph. One file per node, file-locked."""
 
     def __init__(self, root: Path):
         self.root = root
@@ -99,7 +100,10 @@ class Store:
         with self.locked():
             if self.exists():
                 raise FGError(f"fact graph already exists at {self.root}")
-            leftovers = [p.name for p in self.root.iterdir() if p.name != LOCK_NAME]
+            # `agents/` holds nvwa subprocess state and may exist before the
+            # graph itself is initialized.
+            allowed = {LOCK_NAME, "agents"}
+            leftovers = [p.name for p in self.root.iterdir() if p.name not in allowed]
             if leftovers:
                 raise FGError(
                     f"cannot initialize graph in non-empty directory {self.root}; "
@@ -129,14 +133,8 @@ class Store:
     # -- locking --
     @contextmanager
     def locked(self):
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(self.lock_file, "a+")
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        with locking.file_lock(self.lock_file):
             yield
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            fh.close()
 
     # -- project --
     def load_project(self) -> dict:
@@ -2392,6 +2390,12 @@ def cmd_view(args) -> int:
 
 
 def _try_open(path: Path) -> bool:
+    if os.name == "nt":
+        try:
+            os.startfile(os.fspath(path))  # type: ignore[attr-defined]
+            return True
+        except OSError:
+            return False
     import shutil
     import subprocess
     opener = (
@@ -2489,14 +2493,11 @@ def _view_serve(store: Store, args) -> int:
 
 
 def _try_open_url(url: str) -> None:
-    import shutil
-    import subprocess
-    opener = shutil.which("xdg-open") or shutil.which("open")
-    if opener:
-        try:
-            subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+    import webbrowser
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #

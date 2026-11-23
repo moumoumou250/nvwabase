@@ -12,7 +12,7 @@
 📖 **[Full design article (WeChat)](https://mp.weixin.qq.com/s/nibHYWmDTf6TkNhPhtvFdw)**
 
 This fork is a **general-purpose** assistant base. It keeps the shared
-fact-intent graph, project hooks, dispatch loop, and `nvwa` tmux runtime,
+fact-intent graph, project hooks, dispatch loop, and `nvwa` agent runtime,
 and it can drive Claude Code, OpenAI Codex, or the xAI Grok CLI. Domain
 playbooks are not part of the tree. See [What was removed](#removed).
 
@@ -42,13 +42,13 @@ the advanced stage needs almost no human involvement. There is also a
 
 | Capability | Implementation | Civilization's counterpart |
 |---|---|---|
-| **Create** | Opens new AI individuals (e.g., fresh tmux sessions) | Birth |
+| **Create** | Opens new AI individuals (subprocess by default, tmux optional) | Birth |
 | **Language** | AIs talk to each other | Speech |
 | **History** | **The layered fact-intent graph (this repo)** | The stele |
 
 **Honest scope statement**: this repo ships the reusable core — the layered
 fact-intent graph (History), project hooks, sub-agent dispatch, and the
-`nvwa` tmux runtime (Create / Language). It is not tied to a domain. Point
+`nvwa` runtime (Create / Language). It is not tied to a domain. Point
 `FG_BACKEND` at `claude`, `codex`, or `grok` and the same graph drives that
 agent.
 
@@ -81,7 +81,7 @@ graph structure, not in a state machine.
   the budget
 - **Experience reuse**: `fgc recall "<task gist>"` — dependency-free semantic
   search over prior work
-- **Concurrency-safe**: one JSON file per node, flock + atomic writes — many
+- **Concurrency-safe**: one JSON file per node, a file lock (`fcntl` on Unix, `msvcrt` on Windows) + atomic `os.replace` — many
   agents, one graph, no corruption; `git diff`-friendly
 - **Visualization**: `fgc view` renders an interactive HTML DAG
   (self-contained single file, or `--serve` live)
@@ -108,11 +108,39 @@ nvwa spawn --name worker1 --mission "read the graph, then work on intent i001"
 # Language: talk to it
 nvwa say worker1 "what did you find?"
 nvwa listen worker1 40
+nvwa ps
+nvwa logs worker1 -f          # Ctrl-C to stop following
+nvwa stop worker1
+
+# Local panel (loopback only): agents, live output, the fact graph
+nvwa ui                       # http://127.0.0.1:8765
 
 # Commander proposes / record facts
 nvwa dispatch reason
 nvwa fact "confirmed: X works" -t "X works"
 ```
+
+By default `nvwa spawn` starts the selected CLI as a subprocess. Stdout is
+appended to `.fg/agents/<name>.log`, state is `.fg/agents/<name>.json`, and
+`say` lines are written to that process's stdin. `NVWA_RUNNER=tmux` keeps
+the older pane-per-agent behavior (needs `tmux`; not available on native
+Windows). `list` and `kill` remain aliases of `ps` and `stop`.
+
+`nvwa ui` is a stdlib HTTP server on `127.0.0.1:8765` (`--host`, `--port`,
+`--no-open`). One page lists agents (status, backend, start/stop), streams
+the selected agent's output over server-sent events, accepts `say` from an
+input box, and embeds the existing `fgc view` graph with live refresh.
+Each launch generates a random token; API calls must send `X-Nvwa-Token`
+(or `?token=` for the event stream). A request whose `Origin` is some other
+site is rejected. `fgc view --serve` uses the same default port, so run only
+one of them at a time.
+
+On Windows, `lib/fg.py` and `nvwa` run under `py -3` (the graph lock does
+not import `fcntl`). `install.sh` is a bash installer for symlink setup;
+from a checkout you can call `py -3 nvwa` and `py -3 lib\fg.py` directly.
+Interactive TUIs that require a terminal still fit `NVWA_RUNNER=tmux` on
+Unix. The subprocess runner is the portable path: it logs stdout and feeds
+stdin, which is enough for line-oriented agents and for the panel.
 
 Claude Code users: the hooks inject the graph into every turn — facts and
 intents accumulate as you converse. Keep your workflow; gain a stele.
@@ -170,9 +198,10 @@ examples, not a pin.
 Claude `--dangerously-skip-permissions`, Codex
 `--dangerously-bypass-approvals-and-sandbox`, Grok `--always-approve`.
 
-`nvwa spawn` passes the API key through the tmux session environment, not
-through the window command. Its input-box detector looks for Claude's `❯`
-and a few other prompt markers; override with `NVWA_READY_PATTERN`.
+`nvwa spawn` puts API keys in the child environment, not on the command
+line. With `NVWA_RUNNER=tmux` the key is also stored in the tmux session
+environment. The tmux input-box detector looks for Claude's `❯` and a few
+other prompt markers; override with `NVWA_READY_PATTERN`.
 
 <a id="removed"></a>
 
