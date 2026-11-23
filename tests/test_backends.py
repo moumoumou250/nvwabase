@@ -252,7 +252,12 @@ class RunAgentTests(unittest.TestCase):
                 )
         self.assertEqual(envelope["result"], "done")
         self.assertEqual(captured["text"], "grok task")
-        self.assertEqual(captured["mode"], 0o600)
+        if os.name == "nt":
+            # Windows reports st_mode as 0o666 even after chmod; the file is
+            # still removed, which is the cross-process leak we care about.
+            self.assertIn(captured["mode"], (0o600, 0o666))
+        else:
+            self.assertEqual(captured["mode"], 0o600)
         self.assertFalse(captured["path"].exists())
         self.assertEqual(captured["env"]["XAI_API_KEY"], SECRET)
         self.assertNotIn(SECRET, captured["text"])
